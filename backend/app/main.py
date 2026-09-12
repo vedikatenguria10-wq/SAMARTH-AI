@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import engine, Base, SessionLocal
 from app.models import User, Student, Opportunity, Application
-from app.api import health_router, auth_router, students_router, opportunities_router, applications_router
+from app.api import health_router, auth_router, students_router, opportunities_router, applications_router, matching_router
 from app.services.seed_service import seed_database
 
 # Create database tables automatically
@@ -37,6 +37,7 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(students_router, prefix="/api")
 app.include_router(opportunities_router, prefix="/api")
 app.include_router(applications_router, prefix="/api")
+app.include_router(matching_router, prefix="/api")
 
 @app.get("/")
 def root():

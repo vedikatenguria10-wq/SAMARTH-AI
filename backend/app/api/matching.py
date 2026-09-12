@@ -1,0 +1,89 @@
+"""
+POST /api/matching/recommendations
+
+Authenticated student endpoint — returns semantic ranked recommendations.
+Does NOT write to the database.
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from typing import List, Dict, Any
+
+from app.database import get_db
+from app.models.student import Student
+from app.models.opportunity import Opportunity
+from app.models.user import User
+from app.utils.security import get_current_user
+from app.services.matching_service import batch_recommendations
+
+router = APIRouter(prefix="/matching", tags=["Matching"])
+
+
+@router.post("/recommendations")
+def get_recommendations(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Compute semantic recommendations for the authenticated student.
+    Requires the student to have a linked profile.
+    Returns list sorted by match score descending.
+    """
+    if current_user.role != "student":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only students can request recommendations.",
+        )
+
+    # Load student profile linked to this user
+    student_db = db.query(Student).filter(Student.user_id == current_user.id).first()
+    if not student_db:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Student profile not found. Please complete your profile first.",
+        )
+
+    # Load all active opportunities
+    opportunities_db = (
+        db.query(Opportunity).filter(Opportunity.is_active == True).all()
+    )
+
+    if not opportunities_db:
+        return []
+
+    # Convert ORM objects to plain dicts for the matching service
+    student_dict: Dict[str, Any] = {
+        "id": student_db.id,
+        "name": student_db.name,
+        "skills": student_db.skills if isinstance(student_db.skills, list) else [],
+        "interests": student_db.interests if isinstance(student_db.interests, list) else [],
+        "preferred_domain": student_db.preferred_domain or "",
+        "projects": student_db.projects or "",
+    }
+
+    opp_list: List[Dict[str, Any]] = [
+        {
+            "id": o.id,
+            "title": o.title,
+            "org": o.org,
+            "domain": o.domain,
+            "location": o.location,
+            "stipend": float(o.stipend),
+            "required_skills": o.required_skills if isinstance(o.required_skills, list) else [],
+            "description": o.description or "",
+            "seats_total": o.seats_total,
+            "seats_filled": o.seats_filled,
+        }
+        for o in opportunities_db
+    ]
+
+    # Run semantic matching (may take a few seconds; acceptable for hackathon MVP)
+    try:
+        results = batch_recommendations(student_dict, opp_list)
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Semantic matching model unavailable: {e}",
+        )
+
+    return results

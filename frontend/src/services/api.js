@@ -209,4 +209,17 @@ export const api = {
       return [];
     }
   },
+
+  // Semantic Matching: Get ranked recommendations for authenticated student
+  getSemanticRecommendations: async () => {
+    const res = await fetch(`${API_BASE}/matching/recommendations`, {
+      method: 'POST',
+      headers: { ...getAuthHeader() },
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(parseErrorMessage(data, 'Semantic matching failed'));
+    }
+    return await res.json();
+  },
 };

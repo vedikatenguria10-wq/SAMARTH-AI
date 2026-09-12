@@ -14,6 +14,8 @@ export function StudentView({
   setForm,
   submitProfile,
   recommendations,
+  recsLoading = false,
+  recsError = null,
   expanded,
   toggleExpand,
   appliedOppIds = new Set(),
@@ -217,8 +219,20 @@ export function StudentView({
         </button>
       </div>
 
+      {recsLoading && (
+        <div style={{ padding: "18px 0", textAlign: "center", color: "#5B5648", fontSize: 13.5 }}>
+          <span style={{ marginRight: 8 }}>⏳</span> Computing semantic recommendations…
+        </div>
+      )}
+
+      {recsError && (
+        <div style={{ background: "#FDF2F2", border: "1px solid #F8B4B4", color: "#B14D4D", borderRadius: 8, padding: "12px 16px", fontSize: 13, marginBottom: 10 }}>
+          <strong>Semantic matching failed:</strong> {recsError}
+        </div>
+      )}
+
       <div style={{ display: "grid", gap: 12 }}>
-        {recommendations.map(({ opp, match }) => {
+        {!recsLoading && recommendations.map(({ opp, match }) => {
           const isOpen = expanded.has(opp.id);
           const isApplied = appliedOppIds.has(String(opp.id)) || (opp.numericId && appliedOppIds.has(String(opp.numericId)));
           const isApplying = String(applyingOppId) === String(opp.id);

@@ -334,13 +334,76 @@ export default function App() {
     }
   }
 
-  /* -------- recommendations for current student -------- */
-  const recommendations = useMemo(() => {
-    if (!currentStudent) return [];
-    return opportunities
-      .map((opp) => ({ opp, match: computeMatch(currentStudent, opp) }))
-      .sort((a, b) => b.match.pct - a.match.pct);
-  }, [currentStudent, opportunities]);
+  /* -------- semantic recommendations for current student -------- */
+  const [recommendations, setRecommendations] = useState([]);
+  const [recsLoading, setRecsLoading] = useState(false);
+  const [recsError, setRecsError] = useState(null);
+
+  // Triggered whenever currentStudent changes (login, profile submit, student switch)
+  useEffect(() => {
+    if (!currentStudent || !user || user.role !== "student") {
+      setRecommendations([]);
+      setRecsError(null);
+      return;
+    }
+
+    // Only use backend semantic API for real authenticated students (be_ prefix)
+    const isRealStudent = String(currentStudent.id).startsWith("be_");
+    if (!isRealStudent) {
+      // Seed/demo preview student — fall back to local bag-of-words
+      const localRecs = opportunities
+        .map((opp) => ({ opp, match: computeMatch(currentStudent, opp) }))
+        .sort((a, b) => b.match.pct - a.match.pct);
+      setRecommendations(localRecs);
+      setRecsError(null);
+      return;
+    }
+
+    let cancelled = false;
+    async function fetchSemanticRecs() {
+      setRecsLoading(true);
+      setRecsError(null);
+      try {
+        const results = await api.getSemanticRecommendations();
+        if (cancelled) return;
+
+        // results is an array of { opportunity_id, pct, matchedSkills, missingSkills, explanation, breakdown }
+        // Map back to { opp, match } shape that StudentView expects
+        const oppMap = {};
+        opportunities.forEach(o => { oppMap[String(o.id)] = o; oppMap[String(o.numericId)] = o; });
+
+        const mapped = results
+          .map(r => {
+            const opp = oppMap[String(r.opportunity_id)];
+            if (!opp) return null;
+            return {
+              opp,
+              match: {
+                pct: r.pct,
+                matchedSkills: r.matchedSkills || [],
+                missingSkills: r.missingSkills || [],
+                explanation: r.explanation || `${r.pct}% semantic match.`,
+                breakdown: r.breakdown || null,
+              },
+            };
+          })
+          .filter(Boolean);
+
+        setRecommendations(mapped);
+      } catch (err) {
+        if (cancelled) return;
+        // Do NOT silently fall back — surface the error clearly
+        setRecsError(err.message || "Semantic matching failed. Please try again.");
+        setRecommendations([]);
+      } finally {
+        if (!cancelled) setRecsLoading(false);
+      }
+    }
+
+    fetchSemanticRecs();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStudent?.id, opportunities.length, user]);
 
   /* -------- ranked candidates for selected opportunity -------- */
   const selectedOpp = opportunities.find((o) => String(o.id) === String(selectedOppId));
@@ -542,6 +605,8 @@ export default function App() {
             setForm={setForm}
             submitProfile={submitProfile}
             recommendations={recommendations}
+            recsLoading={recsLoading}
+            recsError={recsError}
             expanded={expanded}
             toggleExpand={toggleExpand}
             appliedOppIds={appliedOppIds}
