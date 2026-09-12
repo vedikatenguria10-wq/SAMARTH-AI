@@ -405,17 +405,62 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStudent?.id, opportunities.length, user]);
 
-  /* -------- ranked candidates for selected opportunity -------- */
+  /* -------- ranked candidates for selected opportunity (Semantic) -------- */
   const selectedOpp = opportunities.find((o) => String(o.id) === String(selectedOppId));
-  const rankedCandidates = useMemo(() => {
-    if (!selectedOpp) return [];
-    return students
-      .map((st) => ({ student: st, match: computeMatch(st, selectedOpp) }))
-      .sort((a, b) => b.match.pct - a.match.pct);
-  }, [selectedOpp, students]);
+  const [rankedCandidates, setRankedCandidates] = useState([]);
+  const candidateCacheRef = useRef(new Map());
 
-  /* -------- fair allocation algorithm -------- */
-  function runAllocation(oppId, rehealedCandidateName = null) {
+  useEffect(() => {
+    if (!user || (user.role !== "recruiter" && user.role !== "admin")) {
+      setRankedCandidates([]);
+      return;
+    }
+    if (!selectedOpp || !students || students.length === 0) {
+      setRankedCandidates([]);
+      return;
+    }
+
+    const oppKey = String(selectedOpp.id);
+    if (candidateCacheRef.current.has(oppKey)) {
+      setRankedCandidates(candidateCacheRef.current.get(oppKey));
+    }
+
+    let cancelled = false;
+    async function fetchRanked() {
+      try {
+        const results = await api.getSemanticCandidates(selectedOpp, students);
+        if (cancelled) return;
+        const resultMap = new Map(results.map((r) => [String(r.studentId || r.student_id), r]));
+        const list = students
+          .map((st) => {
+            const m = resultMap.get(String(st.id)) || resultMap.get(String(st.numericId));
+            return {
+              student: st,
+              match: m ? {
+                pct: m.pct,
+                matchedSkills: m.matchedSkills || [],
+                missingSkills: m.missingSkills || [],
+                explanation: m.explanation || `${m.pct}% semantic match.`,
+                breakdown: m.breakdown || null,
+              } : null,
+            };
+          })
+          .filter((item) => item.match != null)
+          .sort((a, b) => b.match.pct - a.match.pct);
+
+        candidateCacheRef.current.set(oppKey, list);
+        setRankedCandidates(list);
+      } catch (err) {
+        console.error("Failed to load semantic candidate ranking:", err);
+      }
+    }
+
+    fetchRanked();
+    return () => { cancelled = true; };
+  }, [selectedOpp?.id, students]);
+
+  /* -------- fair allocation algorithm (Semantic Matching) -------- */
+  async function runAllocation(oppId, rehealedCandidateName = null) {
     const oppList = opportunitiesRef.current;
     const allocList = allocationsRef.current;
     const studentList = studentsRef.current;
@@ -437,9 +482,36 @@ export default function App() {
     const droppedIds = new Set(droppedEntries.map((a) => String(a.studentId)));
 
     // Candidates not already actively allocated or dropped
-    const ranked = studentList
-      .filter((st) => !activeAllocatedIds.has(String(st.id)) && !droppedIds.has(String(st.id)))
-      .map((st) => ({ student: st, match: computeMatch(st, opp) }))
+    const eligibleStudents = studentList.filter(
+      (st) => !activeAllocatedIds.has(String(st.id)) && !droppedIds.has(String(st.id))
+    );
+    if (eligibleStudents.length === 0) return;
+
+    // Fetch real semantic scores for all eligible candidates from backend matching service
+    let results = [];
+    try {
+      results = await api.getSemanticCandidates(opp, eligibleStudents);
+    } catch (err) {
+      console.error("Semantic candidate scoring failed in runAllocation:", err);
+      return;
+    }
+
+    const resultMap = new Map(results.map((r) => [String(r.studentId || r.student_id), r]));
+    const ranked = eligibleStudents
+      .map((st) => {
+        const m = resultMap.get(String(st.id)) || resultMap.get(String(st.numericId));
+        return {
+          student: st,
+          match: m ? {
+            pct: m.pct,
+            matchedSkills: m.matchedSkills || [],
+            missingSkills: m.missingSkills || [],
+            explanation: m.explanation || `${m.pct}% semantic match.`,
+            breakdown: m.breakdown || null,
+          } : null,
+        };
+      })
+      .filter((item) => item.match != null)
       .sort((a, b) => b.match.pct - a.match.pct);
 
     const collegeCap = Math.max(1, Math.ceil(opp.seatsTotal * 0.6));
@@ -524,7 +596,7 @@ export default function App() {
     );
   }
 
-  function simulateDropout(entry) {
+  async function simulateDropout(entry) {
     const oppList = opportunitiesRef.current;
     const studentList = studentsRef.current;
     const droppedStudent = studentList.find(
@@ -534,29 +606,28 @@ export default function App() {
       (o) => String(o.id) === String(entry.oppId) || (o.numericId && String(o.numericId) === String(entry.oppId))
     );
 
-    setAllocations((prev) =>
-      prev.map((a) =>
-        a.id === entry.id
-          ? {
-              ...a,
-              status: "dropped",
-              reason: `Dropped — offer released. Seat freed up for ${opp?.title || "opportunity"}.`,
-              ts: Date.now(),
-            }
-          : a
-      )
+    const updatedAllocations = allocationsRef.current.map((a) =>
+      a.id === entry.id
+        ? {
+            ...a,
+            status: "dropped",
+            reason: `Dropped — offer released. Seat freed up for ${opp?.title || "opportunity"}.`,
+            ts: Date.now(),
+          }
+        : a
     );
-    setOpportunities((prev) =>
-      prev.map((o) =>
-        String(o.id) === String(entry.oppId) || (o.numericId && String(o.numericId) === String(entry.oppId))
-          ? { ...o, seatsFilled: Math.max(0, o.seatsFilled - 1) }
-          : o
-      )
-    );
+    allocationsRef.current = updatedAllocations;
+    setAllocations(updatedAllocations);
 
-    setTimeout(() => {
-      runAllocation(entry.oppId, droppedStudent?.name || "candidate");
-    }, 0);
+    const updatedOpps = opportunitiesRef.current.map((o) =>
+      String(o.id) === String(entry.oppId) || (o.numericId && String(o.numericId) === String(entry.oppId))
+        ? { ...o, seatsFilled: Math.max(0, o.seatsFilled - 1) }
+        : o
+    );
+    opportunitiesRef.current = updatedOpps;
+    setOpportunities(updatedOpps);
+
+    await runAllocation(entry.oppId, droppedStudent?.name || "candidate");
   }
 
   function toggleExpand(id) {

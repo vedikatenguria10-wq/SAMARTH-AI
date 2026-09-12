@@ -222,4 +222,26 @@ export const api = {
     }
     return await res.json();
   },
+
+  // Semantic Matching: Get ranked candidate matches for an opportunity across students
+  getSemanticCandidates: async (opportunity, students = null) => {
+    const oppId = opportunity.id || opportunity.numericId;
+    const res = await fetch(`${API_BASE}/matching/candidates`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAuthHeader(),
+      },
+      body: JSON.stringify({
+        opportunity_id: oppId,
+        opportunity: opportunity,
+        students: students,
+      }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(parseErrorMessage(data, 'Failed to compute candidate matches'));
+    }
+    return await res.json();
+  },
 };

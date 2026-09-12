@@ -10,11 +10,23 @@ Scoring formula (total = 100 points):
   Preferred Domain  : 10 pts  (exact normalised domain match)
 """
 
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 import math
+import threading
 from typing import List, Dict, Any
+
+import torch
+torch.set_num_threads(1)
 
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import cos_sim
+
+# Process-level lock to strictly serialize inference on the shared model
+_inference_lock = threading.RLock()
 
 # ---------------------------------------------------------------------------
 # Load model ONCE at module level — not per-request
@@ -36,7 +48,9 @@ def _encode(texts: List[str]):
     """Encode a list of strings and return normalised embeddings."""
     if _model is None:
         raise RuntimeError("SentenceTransformer model is not loaded.")
-    return _model.encode(texts, convert_to_tensor=True, normalize_embeddings=True)
+    with _inference_lock:
+        with torch.no_grad():
+            return _model.encode(texts, convert_to_tensor=True, normalize_embeddings=True)
 
 
 def _cosine(emb_a, emb_b) -> float:
@@ -73,10 +87,10 @@ def compute_semantic_match(student: Dict[str, Any], opportunity: Dict[str, Any])
         raise RuntimeError("Semantic model unavailable.")
 
     student_skills: List[str] = student.get("skills") or []
-    required_skills: List[str] = opportunity.get("required_skills") or []
+    required_skills: List[str] = opportunity.get("required_skills") or opportunity.get("requiredSkills") or []
     student_projects: str = (student.get("projects") or "").strip()
     student_interests: List[str] = student.get("interests") or []
-    student_domain: str = (student.get("preferred_domain") or "").strip()
+    student_domain: str = (student.get("preferred_domain") or student.get("preferredDomain") or "").strip()
 
     opp_title: str = (opportunity.get("title") or "").strip()
     opp_domain: str = (opportunity.get("domain") or "").strip()
@@ -193,6 +207,9 @@ def compute_semantic_match(student: Dict[str, Any], opportunity: Dict[str, Any])
 
     return {
         "opportunity_id": opportunity.get("id"),
+        "opportunityId": opportunity.get("id"),
+        "student_id": student.get("id"),
+        "studentId": student.get("id"),
         "pct": int(total),
         "matchedSkills": matched_skills,
         "missingSkills": missing_skills,
@@ -224,29 +241,49 @@ def batch_recommendations(student: Dict[str, Any], opportunities: List[Dict[str,
     if not opportunities:
         return []
 
-    # Precompute opportunity text embeddings in one batch
-    opp_texts = [
-        f"{o.get('title', '')} {o.get('description', '')} {o.get('domain', '')}"
-        for o in opportunities
-    ]
-    student_texts = [
-        " ".join(student.get("skills") or []),
-        (student.get("projects") or ""),
-        " ".join((student.get("interests") or []) + (
-            [student.get("preferred_domain", "")] if student.get("preferred_domain") else []
-        )),
-    ]
-    # We still call compute_semantic_match per-opportunity (handles skill matching logic cleanly),
-    # but the model's batching within compute_semantic_match handles efficiency.
-    results = []
-    for opp in opportunities:
-        try:
-            match = compute_semantic_match(student, opp)
-            results.append(match)
-        except Exception as e:
-            # Skip bad records rather than failing the whole request
-            import logging
-            logging.getLogger(__name__).warning(f"Skipped opp {opp.get('id')}: {e}")
+    with _inference_lock:
+        results = []
+        for opp in opportunities:
+            try:
+                match = compute_semantic_match(student, opp)
+                results.append(match)
+            except Exception as e:
+                # Skip bad records rather than failing the whole request
+                import logging
+                logging.getLogger(__name__).warning(f"Skipped opp {opp.get('id')}: {e}")
 
-    results.sort(key=lambda r: r["pct"], reverse=True)
-    return results
+        results.sort(key=lambda r: r["pct"], reverse=True)
+        return results
+
+
+def batch_students_for_opportunity(opportunity: Dict[str, Any], students: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Calculate semantic matches for multiple candidate students against one opportunity.
+    Used by the allocation engine and candidate ranking.
+    Returns list sorted descending by pct.
+    """
+    if not students:
+        return []
+
+    with _inference_lock:
+        results = []
+        for st in students:
+            try:
+                match = compute_semantic_match(st, opportunity)
+                results.append({
+                    "student_id": st.get("id"),
+                    "studentId": st.get("id"),
+                    "opportunity_id": opportunity.get("id"),
+                    "opportunityId": opportunity.get("id"),
+                    "pct": match["pct"],
+                    "matchedSkills": match["matchedSkills"],
+                    "missingSkills": match["missingSkills"],
+                    "explanation": match["explanation"],
+                    "breakdown": match["breakdown"],
+                })
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Skipped student {st.get('id')}: {e}")
+
+        results.sort(key=lambda r: r["pct"], reverse=True)
+        return results
